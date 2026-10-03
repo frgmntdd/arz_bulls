@@ -7,13 +7,13 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"
-SECRET_TOKEN = "SUPER_SECRET_KEY_12345"  # Должен совпадать с TG_CONFIG в Lua!
-SHARED_CHAT_ID = -1001234567890         # ID вашей общей группы с подселенцами
+BOT_TOKEN = "8976214880:AAFjnGXZwAPSEl9c0ndkJlwA2q02a5QSTIg"
+SECRET_TOKEN = "Luna0501"  # Секретный ключ (такой же в MMT.lua)
+SHARED_CHAT_ID = -1003923967726         # ID группы в TG с вами и подселенцами
 
-# Базовая скорость одной видеокарты 10 LVL (BTC в час)
-BASE_RATE_10_LVL = 0.25 
-WARN_BEFORE_HOURS = 4  # Предупреждать за 4 часа до фулла
+# Скорость из скрипта MMT (Arizona RP 2026) для 10 LVL:
+BASE_RATE_10_LVL = 1.227625  # BTC/час на одну карту
+WARN_BEFORE_HOURS = 2.0      # Предупреждение ровно за 2 часа до фулла
 
 DB_FILE = "mining_data.db"
 bot = Bot(token=BOT_TOKEN)
@@ -44,40 +44,53 @@ async def init_db():
                 house_id INTEGER,
                 player_nick TEXT,
                 btc REAL,
-                asc_val REAL,
                 harvest_time TIMESTAMP
             )
         """)
         await db.commit()
 
 # ==================== МАТЕМАТИКА MMT ====================
-def calc_mining_speed(online_hours: int, architect: bool, custom_pct: float) -> float:
-    """Расчет скорости добычи с учетом всех бонусов из MMT"""
+def calc_house_speed(online_hours: int, architect: bool, custom_pct: float) -> tuple[float, float]:
+    """
+    Расчёт эффективной скорости одной карты 10 LVL с бонусами дома:
+    - Онлайн (0-24ч): до +20%
+    - Набор архитектора (для творчества): +30%
+    - Кастомный процент дома
+    """
     bonus = (20.0 * (min(24, max(0, online_hours)) / 24.0))
     if architect:
         bonus += 30.0
     bonus += max(0.0, custom_pct)
-    return BASE_RATE_10_LVL * (1.0 + bonus / 100.0)
+    
+    speed = BASE_RATE_10_LVL * (1.0 + bonus / 100.0)
+    return speed, bonus
 
-def get_fill_hours(speed: float):
-    # Время заполнения карт на 12 и 24 BTC
-    hours_12 = 12.0 / speed
-    hours_24 = 24.0 / speed
-    return hours_12, hours_24
+def get_fill_times(speed: float):
+    """Точное время заполнения (в часах) для карт 12 и 24 BTC"""
+    return 12.0 / speed, 24.0 / speed
+
+def format_duration(hours_float: float) -> str:
+    total_seconds = max(0, int(hours_float * 3600))
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    return f"{h} ч {m} мин"
 
 # ==================== МЕНЮ TELEGRAM ====================
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статус ферм", callback_data="status")],
-        [InlineKeyboardButton(text="⏳ Когда следующий сбор?", callback_data="next_time")],
-        [InlineKeyboardButton(text="📜 История сборов", callback_data="history")]
+        [InlineKeyboardButton(text="📊 Статус ферм (Live)", callback_data="status")],
+        [InlineKeyboardButton(text="⏳ Точный график сбора", callback_data="next_time")],
+        [InlineKeyboardButton(text="📜 История сборов", callback_data="history")],
+        [InlineKeyboardButton(text="⚙️ Настройки бонусов домов", callback_data="house_settings")]
     ])
 
 @dp.message(Command("start", "menu"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "⚡ **Майнинг-контроллер Arizona RP (MMT Core)**\n\n"
-        "Бот отслеживает сборы со всех стоек и рассчитывает точное время заполнения для карт 10 LVL.",
+        "⚡ **Майнинг-контроллер Arizona RP (Точный расчет MMT)**\n\n"
+        f"• Скорость 10 LVL: `{BASE_RATE_10_LVL} BTC/ч`\n"
+        f"• Оповещение: **за 2 часа** до переполнения.\n"
+        "Синхронизировано с действиями всех подселенцев.",
         reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
@@ -97,23 +110,34 @@ async def cb_status(query: types.CallbackQuery):
     text = "📊 **Текущее состояние ферм:**\n\n"
     for hid, ltime_str, nick, on_h, arch, cust in houses:
         ltime = datetime.fromisoformat(ltime_str)
-        speed = calc_mining_speed(on_h, bool(arch), cust)
-        h12, h24 = get_fill_hours(speed)
+        speed, bonus = calc_house_speed(on_h, bool(arch), cust)
+        h12, h24 = get_fill_times(speed)
 
         elapsed = (now - ltime).total_seconds() / 3600.0
+        
+        # Расчет намайненного
+        cur_12 = min(12.0, elapsed * speed)
+        cur_24 = min(24.0, elapsed * speed)
+        
         p12 = min(1.0, elapsed / h12)
         p24 = min(1.0, elapsed / h24)
 
-        cur_12 = round(p12 * 12.0, 2)
-        cur_24 = round(p24 * 24.0, 2)
+        rem12 = max(0.0, h12 - elapsed)
+        rem24 = max(0.0, h24 - elapsed)
 
-        arch_mark = " 🏛 Набор архитектора (+30%)" if arch else ""
+        arch_tag = "🏛 Архитектор (+30%)" if arch else "Без архитектора"
+
         text += (
-            f"🏠 **Дом №{hid}**{arch_mark}\n"
-            f"├ Крайний сбор: `{nick}`\n"
-            f"├ Скорость: `~{round(speed, 3)} BTC/ч` (карта)\n"
-            f"├ Карты 12 BTC: `[{'█'*int(p12*10)}{'░'*(10-int(p12*10))}]` {cur_12}/12 BTC ({int(p12*100)}%)\n"
-            f"└ Карты 24 BTC: `[{'█'*int(p24*10)}{'░'*(10-int(p24*10))}]` {cur_24}/24 BTC ({int(p24*100)}%)\n\n"
+            f"🏠 **Дом №{hid}** [{arch_tag} | Онлайн: {on_h}ч]\n"
+            f"⚡ Скорость: `{round(speed, 3)} BTC/ч` (карта) [бонус: +{int(bonus)}%]\n"
+            f"👤 Крайний сборщик: `{nick}`\n\n"
+            f"📦 **Карты 12 BTC:**\n"
+            f"`[{'█'*int(p12*10)}{'░'*(10-int(p12*10))}]` **{cur_12:.2f}** / 12.00 BTC ({int(p12*100)}%)\n"
+            f"⏳ Осталось: **{format_duration(rem12)}**\n\n"
+            f"📦 **Карты 24 BTC:**\n"
+            f"`[{'█'*int(p24*10)}{'░'*(10-int(p24*10))}]` **{cur_24:.2f}** / 24.00 BTC ({int(p24*100)}%)\n"
+            f"⏳ Осталось: **{format_duration(rem24)}**\n"
+            f"────────────────────\n"
         )
 
     await query.message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
@@ -126,11 +150,11 @@ async def cb_next_time(query: types.CallbackQuery):
         async with db.execute("SELECT house_id, last_harvest_time, online_hours, architect_set, custom_bonus FROM houses") as cur:
             houses = await cur.fetchall()
 
-    text = "⏳ **График следующего сбора:**\n\n"
+    text = "⏳ **Точное расписание заполнения полок:**\n\n"
     for hid, ltime_str, on_h, arch, cust in houses:
         ltime = datetime.fromisoformat(ltime_str)
-        speed = calc_mining_speed(on_h, bool(arch), cust)
-        h12, h24 = get_fill_hours(speed)
+        speed, _ = calc_house_speed(on_h, bool(arch), cust)
+        h12, h24 = get_fill_times(speed)
 
         t12 = ltime + timedelta(hours=h12)
         t24 = ltime + timedelta(hours=h24)
@@ -138,10 +162,13 @@ async def cb_next_time(query: types.CallbackQuery):
         rem12 = max(0.0, (t12 - now).total_seconds() / 3600.0)
         rem24 = max(0.0, (t24 - now).total_seconds() / 3600.0)
 
+        warn_t12 = t12 - timedelta(hours=WARN_BEFORE_HOURS)
+
         text += (
             f"🏠 **Дом №{hid}**:\n"
-            f"• **12 BTC**: {t12.strftime('%d.%m в %H:%M')} (осталось ~{int(rem12)} ч {int((rem12%1)*60)} м)\n"
-            f"• **24 BTC**: {t24.strftime('%d.%m в %H:%M')} (осталось ~{int(rem24)} ч {int((rem24%1)*60)} м)\n\n"
+            f"• **12 BTC (фулл)**: {t12.strftime('%d.%m в %H:%M')} (через {format_duration(rem12)})\n"
+            f"  └ ⚠️ Пред за 2ч: {warn_t12.strftime('%H:%M')}\n"
+            f"• **24 BTC (фулл)**: {t24.strftime('%d.%m в %H:%M')} (через {format_duration(rem24)})\n\n"
         )
 
     await query.message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
@@ -154,60 +181,129 @@ async def cb_history(query: types.CallbackQuery):
             rows = await cur.fetchall()
 
     if not rows:
-        await query.message.answer("История сборов пуста.")
+        await query.message.answer("История пуста.")
         await query.answer()
         return
 
-    text = "📜 **Последние сборы (MMT Sync):**\n\n"
+    text = "📜 **История сборов прибыли:**\n\n"
     for hid, nick, btc, t_str in rows:
         t = datetime.fromisoformat(t_str).strftime('%d.%m %H:%M')
-        text += f"• `{t}` — Дом **№{hid}** | `{nick}` снял `{btc:.2f} BTC`\n"
+        text += f"• `{t}` — Дом **№{hid}** | `{nick}` забрал `{btc:.2f} BTC`\n"
 
     await query.message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
     await query.answer()
 
-# ==================== ФОНОВЫЕ НАПОМИНАНИЯ ====================
+# ==================== НАСТРОЙКИ БОНУСОВ ДОМА ====================
+@dp.callback_query(F.data == "house_settings")
+async def cb_house_settings(query: types.CallbackQuery):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT house_id, architect_set, online_hours FROM houses") as cur:
+            houses = await cur.fetchall()
+
+    kb = []
+    for hid, arch, on_h in houses:
+        arch_status = "ВКЛ" if arch else "ВЫКЛ"
+        kb.append([InlineKeyboardButton(text=f"Дом №{hid} (Архитектор: {arch_status})", callback_data=f"toggle_arch_{hid}")])
+        kb.append([InlineKeyboardButton(text=f"Онлайн дома №{hid}: {on_h} ч (+{int(20*(on_h/24))}%)", callback_data=f"cycle_online_{hid}")])
+    
+    kb.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_main")])
+
+    await query.message.answer("⚙️ **Настройки бонусов майнинга (как в MMT):**\nНажимайте на кнопки для переключения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await query.answer()
+
+@dp.callback_query(F.data.startswith("toggle_arch_"))
+async def cb_toggle_arch(query: types.CallbackQuery):
+    hid = int(query.data.split("_")[2])
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE houses SET architect_set = CASE WHEN architect_set = 1 THEN 0 ELSE 1 END WHERE house_id = ?", (hid,))
+        await db.commit()
+    await cb_house_settings(query)
+
+@dp.callback_query(F.data.startswith("cycle_online_"))
+async def cb_cycle_online(query: types.CallbackQuery):
+    hid = int(query.data.split("_")[2])
+    async with aiosqlite.connect(DB_FILE) as db:
+        # Циклическое переключение: 0 -> 8 -> 16 -> 24 -> 0
+        await db.execute("UPDATE houses SET online_hours = (online_hours + 8) % 32 WHERE house_id = ?", (hid,))
+        await db.commit()
+    await cb_house_settings(query)
+
+@dp.callback_query(F.data == "back_main")
+async def cb_back_main(query: types.CallbackQuery):
+    await query.message.delete()
+    await cmd_start(query.message)
+    await query.answer()
+
+# ==================== МОНИТОРИНГ И ПУШИ (ПРЕД ЗА 2 ЧАСА) ====================
 async def alert_loop():
     while True:
         try:
             now = datetime.now()
             async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT house_id, last_harvest_time, online_hours, architect_set, custom_bonus, warned_12, full_12, warned_24, full_24 FROM houses") as cur:
+                async with db.execute(
+                    "SELECT house_id, last_harvest_time, online_hours, architect_set, custom_bonus, warned_12, full_12, warned_24, full_24 FROM houses"
+                ) as cur:
                     houses = await cur.fetchall()
 
                 for hid, ltime_str, on_h, arch, cust, w12, f12, w24, f24 in houses:
                     ltime = datetime.fromisoformat(ltime_str)
-                    speed = calc_mining_speed(on_h, bool(arch), cust)
-                    h12, h24 = get_fill_hours(speed)
+                    speed, _ = calc_house_speed(on_h, bool(arch), cust)
+                    h12, h24 = get_fill_times(speed)
                     elapsed = (now - ltime).total_seconds() / 3600.0
 
-                    # 12 BTC: Предупреждение за 4 часа
+                    t12 = ltime + timedelta(hours=h12)
+                    t24 = ltime + timedelta(hours=h24)
+
+                    # ----- 12 BTC: ПРЕДУПРЕЖДЕНИЕ ЗА 2 ЧАСА -----
                     if elapsed >= (h12 - WARN_BEFORE_HOURS) and not w12:
-                        await bot.send_message(SHARED_CHAT_ID, f"⚠️ **[Дом №{hid}]** Карты **12 BTC** заполнятся через ~{WARN_BEFORE_HOURS} ч! Приготовьтесь снять прибыль.")
+                        rem_m = int(max(0, (t12 - now).total_seconds() // 60))
+                        await bot.send_message(
+                            SHARED_CHAT_ID,
+                            f"⚠️ **[Дом №{hid}] Внимание!**\n"
+                            f"Стойка **12 BTC** заполнится через **{rem_m // 60} ч {rem_m % 60} мин** (в `{t12.strftime('%H:%M')}`)!\n"
+                            f"Кто рядом на сервере — приготовьтесь забрать прибыль."
+                        )
                         await db.execute("UPDATE houses SET warned_12 = 1 WHERE house_id = ?", (hid,))
 
-                    # 12 BTC: 100% заполнено
+                    # ----- 12 BTC: 100% ЗАПОЛНЕНО -----
                     if elapsed >= h12 and not f12:
-                        await bot.send_message(SHARED_CHAT_ID, f"🚨 **[Дом №{hid}] ВНИМАНИЕ!** Карты на **12 BTC** ПОЛНОСТЬЮ ЗАПОЛНЕНЫ! Майнинг встал, снимите битки!")
+                        await bot.send_message(
+                            SHARED_CHAT_ID,
+                            f"🚨 **[Дом №{hid}] АЛАРМ!**\n"
+                            f"Карты на **12 BTC** ПОЛНОСТЬЮ ЗАПОЛНЕНЫ (12.00 / 12.00 BTC)!\n"
+                            f"Майнинг на них остановлен. Срочно снимите биткоины!"
+                        )
                         await db.execute("UPDATE houses SET full_12 = 1 WHERE house_id = ?", (hid,))
 
-                    # 24 BTC: 100% заполнено
+                    # ----- 24 BTC: ПРЕДУПРЕЖДЕНИЕ ЗА 2 ЧАСА -----
+                    if elapsed >= (h24 - WARN_BEFORE_HOURS) and not w24:
+                        rem_m = int(max(0, (t24 - now).total_seconds() // 60))
+                        await bot.send_message(
+                            SHARED_CHAT_ID,
+                            f"⚠️ **[Дом №{hid}] Внимание!**\n"
+                            f"Стойка **24 BTC** заполнится через **{rem_m // 60} ч {rem_m % 60} мин** (в `{t24.strftime('%H:%M')}`)!"
+                        )
+                        await db.execute("UPDATE houses SET warned_24 = 1 WHERE house_id = ?", (hid,))
+
+                    # ----- 24 BTC: 100% ЗАПОЛНЕНО -----
                     if elapsed >= h24 and not f24:
-                        await bot.send_message(SHARED_CHAT_ID, f"🔥 **[Дом №{hid}] ВНИМАНИЕ!** Карты на **24 BTC** ПОЛНОСТЬЮ ЗАПОЛНЕНЫ!")
+                        await bot.send_message(
+                            SHARED_CHAT_ID,
+                            f"🚨 **[Дом №{hid}] АЛАРМ!**\n"
+                            f"Карты на **24 BTC** ПОЛНОСТЬЮ ЗАПОЛНЕНЫ (24.00 / 24.00 BTC)!"
+                        )
                         await db.execute("UPDATE houses SET full_24 = 1 WHERE house_id = ?", (hid,))
 
                 await db.commit()
         except Exception as e:
             print(f"[Error in alert_loop]: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)  # Высокая точность проверки (каждые 30 секунд)
 
-# ==================== ВЕБ-ЭНДПОИНТЫ (AIOHTTP) ====================
+# ==================== WEB ENDPOINTS ====================
 async def ping_handler(request):
-    """Каждые 15 минут пингуется сервисом UptimeRobot"""
-    return web.json_response({"status": "alive", "server_time": datetime.now().isoformat()})
+    return web.json_response({"status": "ok", "time": datetime.now().isoformat()})
 
 async def harvest_handler(request):
-    """Сюда шлёт запрос MMT при сборе"""
     if request.query.get("token") != SECRET_TOKEN:
         return web.Response(status=403, text="Forbidden")
 
@@ -215,7 +311,6 @@ async def harvest_handler(request):
         house_id = int(request.query.get("house", 0))
         nick = request.query.get("nick", "Игрок")
         btc = float(request.query.get("btc", 0.0))
-        asc_val = float(request.query.get("asc", 0.0))
     except ValueError:
         return web.Response(status=400, text="Bad params")
 
@@ -224,34 +319,33 @@ async def harvest_handler(request):
 
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-            INSERT INTO houses (house_id, last_harvest_time, last_harvest_by, last_btc, last_asc, warned_12, full_12, warned_24, full_24)
-            VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)
+            INSERT INTO houses (house_id, last_harvest_time, last_harvest_by, last_btc, warned_12, full_12, warned_24, full_24)
+            VALUES (?, ?, ?, ?, 0, 0, 0, 0)
             ON CONFLICT(house_id) DO UPDATE SET
                 last_harvest_time = excluded.last_harvest_time,
                 last_harvest_by = excluded.last_harvest_by,
                 last_btc = excluded.last_btc,
-                last_asc = excluded.last_asc,
                 warned_12 = 0, full_12 = 0, warned_24 = 0, full_24 = 0
-        """, (house_id, now_str, nick, btc, asc_val))
+        """, (house_id, now_str, nick, btc))
 
-        await db.execute("INSERT INTO history (house_id, player_nick, btc, asc_val, harvest_time) VALUES (?, ?, ?, ?, ?)",
-                         (house_id, nick, btc, asc_val, now_str))
+        await db.execute("INSERT INTO history (house_id, player_nick, btc, harvest_time) VALUES (?, ?, ?, ?)",
+                         (house_id, nick, btc, now_str))
         await db.commit()
 
-    # Оповещение в общую группу подселенцев
+    # Уведомление в общую группу подселенцев
     await bot.send_message(
         SHARED_CHAT_ID,
-        f"⚡ **Сбор биткоинов завершён!**\n\n"
+        f"⚡ **Сбор биткоинов зафиксирован!**\n\n"
         f"🏠 Дом: **№{house_id}**\n"
-        f"👤 Собрал: `{nick}`\n"
-        f"💰 Снято: `{btc:.2f} BTC`\n"
+        f"👤 Снял: `{nick}`\n"
+        f"💰 Получено: `{btc:.2f} BTC`\n"
         f"🕒 Время: `{now.strftime('%H:%M:%S')}`\n\n"
-        f"Все таймеры дома сброшены на 0.",
+        f"Таймеры сброшены. Следующий сбор 12 BTC через ~7–9 часов.",
         parse_mode="Markdown"
     )
-    return web.json_response({"status": "ok"})
+    return web.json_response({"status": "success"})
 
-# ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
+# ==================== ЗАПУСК ====================
 async def main():
     await init_db()
 
@@ -266,7 +360,7 @@ async def main():
     await site.start()
 
     asyncio.create_task(alert_loop())
-    print("Web-сервер запущен на порту 8080. Запуск Telegram Polling...")
+    print("Сервер запущен (порт 8080). Polling бота активен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
