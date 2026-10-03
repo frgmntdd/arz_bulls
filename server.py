@@ -8,9 +8,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "ВАШ_ТОКЕН_BOTFATHER"
-SECRET_TOKEN = "SUPER_SECRET_KEY_12345"  # Совпадает с TG_CONFIG в Lua!
-SHARED_CHAT_ID = -1001234567890         # ID группы в TG с вами и подселенцами
+BOT_TOKEN = "8976214880:AAFjnGXZwAPSEl9c0ndkJlwA2q02a5QSTIg"
+SECRET_TOKEN = "Luna0501"  # Совпадает с TG_CONFIG в Lua!
+SHARED_CHAT_ID = -1003923967726         # ID группы в TG с вами и подселенцами
 
 BASE_RATE_10_LVL = 1.227625  # BTC/час на одну карту (Arizona RP)
 WARN_BEFORE_HOURS = 2.0      # Пред за 2 часа
