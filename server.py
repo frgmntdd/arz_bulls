@@ -302,9 +302,28 @@ async def heartbeat_handler(request):
     except ValueError:
         return web.Response(status=400, text="Bad params")
 
-    online_players.setdefault(hid, {})[nick] = datetime.now().timestamp()
-    return web.json_response({"status": "online_tracked"})
+    now = datetime.now().timestamp()
+    was_offline = False
 
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT house_id FROM houses") as cur:
+            db_houses = await cur.fetchall()
+
+    # Если hid == 0 — применяем онлайн ко ВСЕМ зарегистрированным домам команды
+    target_houses = [hid] if hid > 0 else [row[0] for row in db_houses]
+
+    for h in target_houses:
+        is_on, _ = is_house_online(h)
+        if not is_on:
+            was_offline = True
+        online_players.setdefault(h, {})[nick] = now
+
+    # Если дом перешёл из офлайна в онлайн — моментально обновляем Telegram-сообщение!
+    if was_offline:
+        asyncio.create_task(update_live_dashboard())
+
+    return web.json_response({"status": "online_tracked", "houses": target_houses})
+    
 async def harvest_handler(request):
     """Сбор через MMT"""
     if request.query.get("token") != SECRET_TOKEN:
